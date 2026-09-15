@@ -28,9 +28,33 @@ export default function Home() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    // Get 2D rendering context once with desynchronized hint for low-latency GPU compositing
+    const ctx =
+      canvas.getContext("2d", { alpha: false, desynchronized: true }) ||
+      canvas.getContext("2d", { alpha: false });
+    if (!ctx) return;
+
+    const setupSmoothing = () => {
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+    };
+
+    // Cache layout dimensions to avoid getBoundingClientRect layout thrashing during scroll
+    let containerTop = 0;
+    let scrollableHeight = 1;
+
+    const updateDimensions = () => {
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      containerTop = rect.top + window.scrollY;
+      scrollableHeight = Math.max(containerRef.current.offsetHeight - window.innerHeight, 1);
+    };
+
     // 1. High-DPI Canvas Sizing & Full DPR Scaling (Retina / Mobile Fix)
     const updateCanvasSize = () => {
       if (!canvas) return;
+      updateDimensions();
+
       const dpr = window.devicePixelRatio || 1;
       const width = window.innerWidth;
       const height = window.innerHeight;
@@ -41,30 +65,27 @@ export default function Home() {
       if (canvas.width !== physicalWidth || canvas.height !== physicalHeight) {
         canvas.width = physicalWidth;
         canvas.height = physicalHeight;
+        setupSmoothing();
         renderFrame(Math.round(currentFrameRef.current));
       }
     };
 
     // 2. Render Frame with Smart Cover Aspect Ratio & Violet-Centered Framing
     const renderFrame = (frameIndex: number) => {
-      if (!canvas) return;
-      const ctx = canvas.getContext("2d", { alpha: false });
-      if (!ctx) return;
-
-      // Find target or nearest loaded frame
+      // Direct O(1) lookup via isLoadedRef for instant frame acquisition
       let imgToDraw: HTMLImageElement | null = null;
-      if (imagesRef.current[frameIndex]?.complete && imagesRef.current[frameIndex]?.naturalWidth > 0) {
+      if (isLoadedRef.current[frameIndex] && imagesRef.current[frameIndex]) {
         imgToDraw = imagesRef.current[frameIndex];
       } else {
         const maxDist = Math.max(frameIndex, TOTAL_FRAMES - 1 - frameIndex);
         for (let d = 1; d <= maxDist; d++) {
           const prev = frameIndex - d;
-          if (prev >= 0 && imagesRef.current[prev]?.complete && imagesRef.current[prev]?.naturalWidth > 0) {
+          if (prev >= 0 && isLoadedRef.current[prev] && imagesRef.current[prev]) {
             imgToDraw = imagesRef.current[prev];
             break;
           }
           const next = frameIndex + d;
-          if (next < TOTAL_FRAMES && imagesRef.current[next]?.complete && imagesRef.current[next]?.naturalWidth > 0) {
+          if (next < TOTAL_FRAMES && isLoadedRef.current[next] && imagesRef.current[next]) {
             imgToDraw = imagesRef.current[next];
             break;
           }
@@ -105,9 +126,6 @@ export default function Home() {
         sourceY = (iHeight - sourceHeight) / 2;
       }
 
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = "high";
-
       ctx.drawImage(
         imgToDraw,
         sourceX,
@@ -128,7 +146,7 @@ export default function Home() {
     // 3. Progressive Frame Preloader with Image Decoding
     let activeQueue: number[] = [];
     let isQueueRunning = false;
-    const MAX_CONCURRENT = 8;
+    const MAX_CONCURRENT = 6;
     let currentlyLoading = 0;
 
     const loadSingleFrame = (index: number): Promise<void> => {
@@ -144,7 +162,6 @@ export default function Home() {
 
         const onFrameLoaded = () => {
           isLoadedRef.current[index] = true;
-          // If this frame is the current frame or closest to current target, redraw
           const activeTarget = Math.round(currentFrameRef.current);
           if (Math.abs(activeTarget - index) <= 1) {
             renderFrame(activeTarget);
@@ -217,36 +234,34 @@ export default function Home() {
     activeQueue = [...keyframes, ...remainingFrames];
     processQueue();
 
-    // 4. Scroll Tracking
+    // 4. Scroll Tracking (Zero-Reflow & Throttled Urgent Queue)
+    let lastPriorityTarget = -1;
+
     const handleScroll = () => {
-      const container = containerRef.current;
-      if (!container) return;
-
-      const rect = container.getBoundingClientRect();
-      const scrollableHeight = rect.height - window.innerHeight;
-      if (scrollableHeight <= 0) return;
-
-      // Calculate progress between 0 and 1
-      const progress = Math.min(Math.max(-rect.top / scrollableHeight, 0), 1);
+      const scrollY = window.scrollY || window.pageYOffset || 0;
+      const progress = Math.min(Math.max((scrollY - containerTop) / scrollableHeight, 0), 1);
       targetFrameRef.current = progress * (TOTAL_FRAMES - 1);
 
-      // Dynamically prioritize loading frames around current scroll target if not loaded
+      // Throttled prioritization: Only reorganize queue when target moves to a new frame window
       const targetIdx = Math.round(targetFrameRef.current);
-      const urgentNeighbors: number[] = [];
-      for (let offset = -4; offset <= 8; offset++) {
-        const idx = targetIdx + offset;
-        if (idx >= 0 && idx < TOTAL_FRAMES && !isLoadedRef.current[idx]) {
-          urgentNeighbors.push(idx);
+      if (Math.abs(targetIdx - lastPriorityTarget) >= 3) {
+        lastPriorityTarget = targetIdx;
+        const urgentNeighbors: number[] = [];
+        for (let offset = -4; offset <= 8; offset++) {
+          const idx = targetIdx + offset;
+          if (idx >= 0 && idx < TOTAL_FRAMES && !isLoadedRef.current[idx]) {
+            urgentNeighbors.push(idx);
+          }
         }
-      }
 
-      if (urgentNeighbors.length > 0) {
-        // Unshift urgent frames to the front of queue
-        activeQueue = [
-          ...urgentNeighbors,
-          ...activeQueue.filter((idx) => !urgentNeighbors.includes(idx)),
-        ];
-        processQueue();
+        if (urgentNeighbors.length > 0) {
+          const urgentSet = new Set(urgentNeighbors);
+          activeQueue = [
+            ...urgentNeighbors,
+            ...activeQueue.filter((idx) => !urgentSet.has(idx)),
+          ];
+          processQueue();
+        }
       }
     };
 
@@ -259,19 +274,26 @@ export default function Home() {
     };
     mediaQuery.addEventListener("change", handleMotionChange);
 
-    // 6. Smooth Lerp Animation Loop
-    const tick = () => {
+    // 6. Smooth Lerp Animation Loop (Framerate-Independent Exponential Damping)
+    let lastTime = 0;
+
+    const tick = (now: number) => {
+      if (!lastTime) lastTime = now;
+      const dt = Math.min((now - lastTime) / 1000, 0.1);
+      lastTime = now;
+
       const target = targetFrameRef.current;
 
       if (prefersReducedMotion) {
         currentFrameRef.current = target;
       } else {
         const diff = target - currentFrameRef.current;
-        if (Math.abs(diff) < 0.002) {
+        if (Math.abs(diff) < 0.001) {
           currentFrameRef.current = target;
         } else {
-          // Apple-style linear interpolation (lerp)
-          currentFrameRef.current += diff * 0.1;
+          // Dynamic exponential decay (lambda = 14): buttery smooth across 60Hz and 120Hz
+          const factor = 1 - Math.exp(-14 * dt);
+          currentFrameRef.current += diff * factor;
         }
       }
 
