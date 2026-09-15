@@ -39,14 +39,3 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-
-# media & assets (hemat kuota)
-public/images/
-public/assets/
-*.png
-*.jpg
-*.jpeg
-*.svg
-*.webp
-*.ico
-*.mp4
