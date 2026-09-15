@@ -28,10 +28,10 @@ export default function Home() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    // 1. High-DPI Canvas Sizing & Responsive Adjustment
+    // 1. High-DPI Canvas Sizing & Full DPR Scaling (Retina / Mobile Fix)
     const updateCanvasSize = () => {
       if (!canvas) return;
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const dpr = window.devicePixelRatio || 1;
       const width = window.innerWidth;
       const height = window.innerHeight;
 
@@ -45,7 +45,7 @@ export default function Home() {
       }
     };
 
-    // 2. Render Frame with Cover Aspect Ratio
+    // 2. Render Frame with Smart Cover Aspect Ratio & Violet-Centered Framing
     const renderFrame = (frameIndex: number) => {
       if (!canvas) return;
       const ctx = canvas.getContext("2d", { alpha: false });
@@ -80,20 +80,52 @@ export default function Home() {
       const iWidth = imgToDraw.naturalWidth || 1280;
       const iHeight = imgToDraw.naturalHeight || 720;
 
-      // Cover calculation
-      const ratio = Math.max(cWidth / iWidth, cHeight / iHeight);
-      const drawWidth = iWidth * ratio;
-      const drawHeight = iHeight * ratio;
-      const drawX = (cWidth - drawWidth) / 2;
-      const drawY = (cHeight - drawHeight) / 2;
+      // Smart Cover Aspect Ratio calculation
+      const canvasAspect = cWidth / cHeight;
+      const imageAspect = iWidth / iHeight;
 
-      ctx.drawImage(imgToDraw, drawX, drawY, drawWidth, drawHeight);
+      let sourceX = 0;
+      let sourceY = 0;
+      let sourceWidth = iWidth;
+      let sourceHeight = iHeight;
+
+      if (canvasAspect < imageAspect) {
+        // Viewport is taller/narrower (Mobile portrait)
+        // Keep full height, crop sides symmetrically so Violet (centered) stays in viewport center
+        sourceHeight = iHeight;
+        sourceWidth = iHeight * canvasAspect;
+        sourceX = (iWidth - sourceWidth) / 2;
+        sourceY = 0;
+      } else {
+        // Viewport is wider (Desktop / Landscape)
+        // Keep full width, crop top/bottom symmetrically
+        sourceWidth = iWidth;
+        sourceHeight = iWidth / canvasAspect;
+        sourceX = 0;
+        sourceY = (iHeight - sourceHeight) / 2;
+      }
+
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+
+      ctx.drawImage(
+        imgToDraw,
+        sourceX,
+        sourceY,
+        sourceWidth,
+        sourceHeight,
+        0,
+        0,
+        cWidth,
+        cHeight
+      );
+
       lastRenderedIndexRef.current = frameIndex;
     };
 
     updateCanvasSize();
 
-    // 3. Progressive Frame Preloader
+    // 3. Progressive Frame Preloader with Image Decoding
     let activeQueue: number[] = [];
     let isQueueRunning = false;
     const MAX_CONCURRENT = 8;
@@ -110,7 +142,7 @@ export default function Home() {
         img.src = getFrameSrc(index);
         imagesRef.current[index] = img;
 
-        img.onload = () => {
+        const onFrameLoaded = () => {
           isLoadedRef.current[index] = true;
           // If this frame is the current frame or closest to current target, redraw
           const activeTarget = Math.round(currentFrameRef.current);
@@ -120,9 +152,22 @@ export default function Home() {
           resolve();
         };
 
-        img.onerror = () => {
-          resolve();
-        };
+        if (typeof img.decode === "function") {
+          img
+            .decode()
+            .then(onFrameLoaded)
+            .catch(() => {
+              if (img.complete && img.naturalWidth > 0) {
+                onFrameLoaded();
+              } else {
+                img.onload = onFrameLoaded;
+                img.onerror = () => resolve();
+              }
+            });
+        } else {
+          img.onload = onFrameLoaded;
+          img.onerror = () => resolve();
+        }
       });
     };
 
@@ -263,7 +308,7 @@ export default function Home() {
         <canvas
           ref={canvasRef}
           aria-hidden="true"
-          className="absolute inset-0 w-full h-full object-cover z-0 pointer-events-none"
+          className="absolute inset-0 w-full h-full object-cover z-0 pointer-events-none will-change-transform"
         />
 
         {/* Cinematic atmospheric overlays for violet/purple tone depth and contrast */}
